@@ -4,7 +4,7 @@ using ScottPlot;
 namespace Simulador.Benchmark
 {
     /// <summary>
-    /// Gera os gráficos do relatório a partir do CSV do benchmark.
+    /// Gera os gráficos de desempenho a partir do CSV do benchmark.
     ///
     /// Usa a MEDIANA das repetições, e não a média: uma repetição atrapalhada por algo externo
     /// (antivírus, atualização do Windows, outro processo usando o disco) puxaria a média,

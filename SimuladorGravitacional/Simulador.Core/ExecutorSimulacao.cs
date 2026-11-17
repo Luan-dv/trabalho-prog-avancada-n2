@@ -5,8 +5,8 @@ namespace SimuladorGravitacional
 {
     /// <summary>
     /// Roda uma simulação do início ao fim medindo, separadamente, o tempo de cálculo e o de
-    /// gravação. A interface e o benchmark usam este mesmo laço, então os números do
-    /// relatório correspondem ao que o programa realmente faz.
+    /// gravação. A interface e o benchmark usam este mesmo laço, então os tempos medidos no
+    /// benchmark correspondem ao que o programa realmente faz.
     /// </summary>
     public static class ExecutorSimulacao
     {

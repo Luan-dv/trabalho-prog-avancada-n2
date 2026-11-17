@@ -149,33 +149,6 @@ $b = "SimuladorGravitacional/Simulador.Benchmark/bin/Release/net10.0/Simulador.B
 & $b graficos --csv r.csv --saida graficos
 ```
 
-### Como interpretar os resultados (para o relatório)
-
-- **N1 e N2 recebem exatamente as mesmas entradas** (mesma semente). Para a comparação de
-  gravação ser justa, o modo N1 grava em arquivo **as mesmas informações e a mesma
-  quantidade de linhas** que a N2 grava no banco. A N1 original gravava só o estado
-  inicial.
-- **`corpos_medios`:** a geração aleatória da N1 cria muitos corpos sobrepostos, que se
-  fundem logo nas primeiras interações. "2000 corpos" processa em média ~1450 por
-  interação, e "100 corpos" só ~30. Use esta coluna ao discutir o custo O(n²).
-- **Speedup:** o paralelo calcula a força de cada par duas vezes (uma para cada corpo),
-  para não precisar de locks. Mesmo assim, com 1 thread ele empata com a N1 ou a supera,
-  porque lê posições de vetores contíguos. O ganho cresce com o nº de corpos: com poucos
-  corpos, o custo de coordenar as threads é comparável ao trabalho. Em testes nesta máquina
-  (12 núcleos lógicos, 2000 corpos), o cálculo ficou ~4,4× mais rápido com 8 threads.
-- **Gravação:** o MySQL é bem mais lento que acrescentar linhas a um arquivo, porque cada
-  linha passa por rede, parse de SQL, índices, chaves estrangeiras e log de transações com
-  `fsync`. O ganho do banco está em outro lugar: consultar, filtrar e reproduzir qualquer
-  simulação. Os lotes (1000 linhas por INSERT, COMMIT a cada 50 mil) evitam o pior caso, que
-  seria um COMMIT por linha. Num MySQL dentro do Docker Desktop no Windows, cerca de metade
-  do tempo de gravação é o transporte pela camada de rede do Docker; uma instalação nativa
-  tende a gravar mais rápido.
-- **Correção do paralelismo:** `verificar` mostra que, após 1 interação, a diferença entre
-  sequencial e paralelo é ~1e-15 (arredondamento de somar em outra ordem). A partir daí ela
-  cresce, porque o problema de N corpos é caótico e encontros próximos amplificam qualquer
-  diferença. Mesmo assim, as duas versões têm **as mesmas fusões, nas mesmas interações**.
-  Com qualquer nº de threads, o paralelo dá resultado **bit a bit idêntico** (ver testes).
-
 ## 7. Testes
 
 ```powershell
