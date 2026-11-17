@@ -54,6 +54,7 @@ namespace SimuladorGravitacional
         private readonly Button btnPlay = new Button { Text = "▶ Reproduzir", AutoSize = true, Enabled = false };
         private readonly TrackBar barraInteracao = new TrackBar { Dock = DockStyle.Fill, TickStyle = TickStyle.None, Enabled = false };
         private readonly NumericUpDown nudVelocidade = new NumericUpDown { Minimum = 1, Maximum = 2000, Value = 20, Width = 60 };
+        private readonly CheckBox chkZoom = new CheckBox { Text = "Zoom automático", Checked = true, AutoSize = true, Margin = new Padding(8, 7, 0, 0) };
         private readonly Label lblInteracao = new Label { AutoSize = true, Margin = new Padding(8, 8, 0, 0) };
         private readonly Label lblEventos = new Label { AutoSize = true, Margin = new Padding(8, 8, 0, 0), ForeColor = Color.DarkOrange };
         private readonly PainelUniverso painel = new PainelUniverso { Dock = DockStyle.Fill, BackColor = Color.Black };
@@ -82,7 +83,7 @@ namespace SimuladorGravitacional
             controles.Controls.AddRange(new Control[]
             {
                 btnPlay, new Label { Text = "Interações/s:", AutoSize = true, Margin = new Padding(8, 8, 0, 0) },
-                nudVelocidade, lblInteracao
+                nudVelocidade, chkZoom, lblInteracao
             });
 
             var barraControles = new Panel { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(3) };
@@ -111,6 +112,11 @@ namespace SimuladorGravitacional
             barraInteracao.ValueChanged += async (s, e) =>
             {
                 if (!_ajustandoBarra) await IrParaAsync(barraInteracao.Value);
+            };
+            chkZoom.CheckedChanged += (s, e) =>
+            {
+                _renderizador.ZoomAutomatico = chkZoom.Checked;
+                painel.Invalidate();
             };
             painel.Paint += (s, e) =>
                 _renderizador.Desenhar(e.Graphics, painel.ClientSize, QuadroAtual(), "Escolha uma simulação na lista e clique em \"Abrir replay\"");
@@ -339,7 +345,8 @@ namespace SimuladorGravitacional
             double dias = _interacaoAtual * _simulacao!.PassoDeTempo / 86400.0;
 
             lblInteracao.Text = $"Interação {_interacaoAtual:N0}/{UltimaInteracao():N0}  |  " +
-                                $"Corpos: {corpos.Count}  |  Tempo simulado: {dias:N2} dias";
+                                RenderizadorUniverso.DescreverCorpos(corpos, _simulacao.QtdCorpos) +
+                                $"  |  Tempo simulado: {dias:N2} dias";
 
             if (_fusoesPorInteracao.Contains(_interacaoAtual))
             {

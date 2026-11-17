@@ -25,11 +25,13 @@ namespace SimuladorGravitacional
         private const int DivisoesGrade = 10;
         private const int QuantidadeEstrelas = 220;
         private const int LimiteRotulos = 25;            // acima disso os nomes poluiriam a tela
+        private const float LadoMinimoBordaPx = 10f;     // tamanho mínimo da borda do universo na tela
 
         private static readonly Color FundoTopo = Color.FromArgb(3, 5, 14);
         private static readonly Color FundoBase = Color.FromArgb(16, 12, 44);
         private static readonly Color CorGrade = Color.FromArgb(22, 120, 150, 255);
         private static readonly Color CorMoldura = Color.FromArgb(70, 90, 140);
+        private static readonly Color CorLimite = Color.FromArgb(150, 120, 160, 230);
         private static readonly Color CorTexto = Color.FromArgb(190, 200, 215, 240);
         private static readonly Color CorFria = Color.FromArgb(90, 170, 255);
         private static readonly Color CorQuente = Color.FromArgb(255, 170, 80);
@@ -61,6 +63,69 @@ namespace SimuladorGravitacional
         // Criada uma vez: a tela é redesenhada várias vezes por segundo durante a simulação/replay
         private readonly Font _fonte = new Font("Segoe UI", 8f);
 
+        // ------------------------------------------------------------ Câmera (zoom automático)
+        //
+        // O universo não tem paredes. Num encontro muito próximo, o passo de tempo grande
+        // (3600 s) faz a atração virar um "chute" enorme num único passo, e o corpo é lançado
+        // para fora da área inicial. Com a escala fixa da N1 esses corpos simplesmente sumiam
+        // da tela, parecendo ter desaparecido. A câmera abaixo enquadra todos os corpos e
+        // mantém a borda do universo desenhada como referência. Só a EXIBIÇÃO muda; a física
+        // continua idêntica à da N1.
+
+        private const double MargemVista = 0.06;          // folga em volta dos corpos (6% de cada lado)
+        private const double SuavizacaoReducao = 0.15;    // fração do caminho percorrida por quadro ao aproximar
+
+        /// <summary>Se falso, mostra só a área original do universo (como na N1).</summary>
+        public bool ZoomAutomatico { get; set; } = true;
+
+        // Região quadrada do espaço (em metros) que está sendo mostrada
+        private double _vistaX, _vistaY, _vistaLado;
+        private bool _vistaIniciada;
+
+        /// <summary>Converte coordenadas do espaço (m) em pixels, com a mesma escala em X e Y.</summary>
+        private readonly struct Transformacao
+        {
+            public readonly double Escala;              // pixels por metro
+            private readonly double _origemX, _origemY;  // canto da vista, em metros
+            private readonly double _deslocX, _deslocY;  // centraliza o quadrado na área do painel
+
+            public Transformacao(Size area, double vistaX, double vistaY, double vistaLado)
+            {
+                Escala = Math.Min(area.Width, area.Height) / vistaLado;
+                _origemX = vistaX;
+                _origemY = vistaY;
+                _deslocX = (area.Width - vistaLado * Escala) / 2;
+                _deslocY = (area.Height - vistaLado * Escala) / 2;
+            }
+
+            public float X(double metros) => (float)(_deslocX + (metros - _origemX) * Escala);
+            public float Y(double metros) => (float)(_deslocY + (metros - _origemY) * Escala);
+        }
+
+        /// <summary>Quantos corpos estão dentro e fora da área original do universo.</summary>
+        public static (int Dentro, int Fora) ContarPorArea(IReadOnlyList<EstadoCorpo> corpos)
+        {
+            int dentro = 0;
+            foreach (EstadoCorpo c in corpos)
+            {
+                if (c.PosicaoX >= 0 && c.PosicaoX <= Universo.LadoEmMetros &&
+                    c.PosicaoY >= 0 && c.PosicaoY <= Universo.LadoEmMetros)
+                    dentro++;
+            }
+            return (dentro, corpos.Count - dentro);
+        }
+
+        /// <summary>
+        /// Texto da barra de status. Separa os dois motivos pelos quais um corpo "some": fusão
+        /// (deixou de existir) e lançamento para fora da borda (continua existindo).
+        /// </summary>
+        public static string DescreverCorpos(IReadOnlyList<EstadoCorpo> corpos, int quantidadeInicial)
+        {
+            var (dentro, fora) = ContarPorArea(corpos);
+            return $"Corpos: {corpos.Count} (dentro da borda: {dentro}, fora: {fora})  |  " +
+                   $"Fusões: {Math.Max(0, quantidadeInicial - corpos.Count)}";
+        }
+
         public void Desenhar(Graphics g, Size area, IReadOnlyList<EstadoCorpo>? corpos, string aviso)
         {
             if (area.Width <= 0 || area.Height <= 0) return;   // janela minimizada
@@ -68,18 +133,65 @@ namespace SimuladorGravitacional
             g.SmoothingMode = SmoothingMode.AntiAlias;
             DesenharFundo(g, area);
             DesenharEstrelas(g, area);
-            DesenharGrade(g, area);
+
+            AtualizarVista(corpos);
+            var t = new Transformacao(area, _vistaX, _vistaY, _vistaLado);
+            DesenharGrade(g, t, _fonte);
 
             if (corpos == null)
                 DesenharAviso(g, area, _fonte, aviso);
             else
-                DesenharCorpos(g, area, corpos, _fonte);
+                DesenharCorpos(g, area, t, corpos, _fonte);
 
-            DesenharLegenda(g, area, _fonte);
+            DesenharLegenda(g, area, t, corpos, _fonte);
             DesenharMoldura(g, area);
         }
 
         public void Dispose() => _fonte.Dispose();
+
+        // Quando um corpo sai do enquadramento a câmera se afasta NA HORA (para nenhum corpo
+        // ficar invisível); quando todos voltam para perto ela se aproxima AOS POUCOS, evitando
+        // que a imagem fique "pulando" a cada quadro.
+        private void AtualizarVista(IReadOnlyList<EstadoCorpo>? corpos)
+        {
+            double minX = 0, minY = 0, maxX = Universo.LadoEmMetros, maxY = Universo.LadoEmMetros;
+
+            if (ZoomAutomatico && corpos != null)
+            {
+                foreach (EstadoCorpo c in corpos)
+                {
+                    if (!double.IsFinite(c.PosicaoX) || !double.IsFinite(c.PosicaoY)) continue;
+                    minX = Math.Min(minX, c.PosicaoX);
+                    maxX = Math.Max(maxX, c.PosicaoX);
+                    minY = Math.Min(minY, c.PosicaoY);
+                    maxY = Math.Max(maxY, c.PosicaoY);
+                }
+            }
+
+            // Mantém a vista quadrada para os corpos não ficarem achatados
+            double lado = Math.Max(maxX - minX, maxY - minY);
+            if (ZoomAutomatico) lado *= 1 + 2 * MargemVista;
+            double alvoX = (minX + maxX - lado) / 2;
+            double alvoY = (minY + maxY - lado) / 2;
+
+            bool cabeNaVistaAtual = _vistaIniciada &&
+                alvoX >= _vistaX && alvoY >= _vistaY &&
+                alvoX + lado <= _vistaX + _vistaLado && alvoY + lado <= _vistaY + _vistaLado;
+
+            if (!ZoomAutomatico || !cabeNaVistaAtual)
+            {
+                _vistaX = alvoX;
+                _vistaY = alvoY;
+                _vistaLado = lado;
+                _vistaIniciada = true;
+            }
+            else
+            {
+                _vistaX += (alvoX - _vistaX) * SuavizacaoReducao;
+                _vistaY += (alvoY - _vistaY) * SuavizacaoReducao;
+                _vistaLado += (lado - _vistaLado) * SuavizacaoReducao;
+            }
+        }
 
         private static void DesenharFundo(Graphics g, Size area)
         {
@@ -102,37 +214,57 @@ namespace SimuladorGravitacional
             }
         }
 
-        private static void DesenharGrade(Graphics g, Size area)
+        // A grade e a borda ocupam só a área ORIGINAL do universo: quando a câmera se afasta,
+        // elas encolhem e mostram onde os corpos começaram.
+        private static void DesenharGrade(Graphics g, Transformacao t, Font fonte)
         {
+            float x0 = t.X(0), y0 = t.Y(0);
+            float x1 = t.X(Universo.LadoEmMetros), y1 = t.Y(Universo.LadoEmMetros);
+
             using (Pen linha = new Pen(CorGrade))
             {
                 for (int i = 1; i < DivisoesGrade; i++)
                 {
-                    float x = (float)area.Width * i / DivisoesGrade;
-                    float y = (float)area.Height * i / DivisoesGrade;
-                    g.DrawLine(linha, x, 0, x, area.Height);
-                    g.DrawLine(linha, 0, y, area.Width, y);
+                    float x = x0 + (x1 - x0) * i / DivisoesGrade;
+                    float y = y0 + (y1 - y0) * i / DivisoesGrade;
+                    g.DrawLine(linha, x, y0, x, y1);
+                    g.DrawLine(linha, x0, y, x1, y);
+                }
+            }
+
+            using (Pen borda = new Pen(CorLimite) { DashStyle = DashStyle.Dash })
+            {
+                // Com a câmera muito afastada a área original pode ficar menor que um pixel;
+                // um tamanho mínimo e um rótulo mantêm visível onde os corpos começaram.
+                float lado = x1 - x0;
+                if (lado < LadoMinimoBordaPx)
+                {
+                    float cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+                    g.DrawRectangle(borda, cx - LadoMinimoBordaPx / 2, cy - LadoMinimoBordaPx / 2, LadoMinimoBordaPx, LadoMinimoBordaPx);
+                    using (SolidBrush pincel = new SolidBrush(CorLimite))
+                        g.DrawString("área inicial", fonte, pincel, cx + LadoMinimoBordaPx / 2 + 3, cy - fonte.Height / 2f);
+                }
+                else
+                {
+                    g.DrawRectangle(borda, x0, y0, lado, y1 - y0);
                 }
             }
         }
 
-        private static void DesenharCorpos(Graphics g, Size area, IReadOnlyList<EstadoCorpo> corpos, Font fonte)
+        private static void DesenharCorpos(Graphics g, Size area, Transformacao t, IReadOnlyList<EstadoCorpo> corpos, Font fonte)
         {
-            double escalaX = area.Width / Universo.LadoEmMetros;
-            double escalaY = area.Height / Universo.LadoEmMetros;
-            double escalaRaio = Math.Min(escalaX, escalaY);   // mantém o corpo redondo, não achatado
             bool mostrarNomes = corpos.Count <= LimiteRotulos;
 
             using (SolidBrush pincelTexto = new SolidBrush(CorTexto))
             {
                 foreach (EstadoCorpo c in corpos)
                 {
-                    float r = (float)Math.Max(RaioMinimoPx, c.Raio * escalaRaio * FatorRaioVisual);
-                    float x = (float)(c.PosicaoX * escalaX);
-                    float y = (float)(c.PosicaoY * escalaY);
+                    float r = (float)Math.Max(RaioMinimoPx, c.Raio * t.Escala * FatorRaioVisual);
+                    float x = t.X(c.PosicaoX);
+                    float y = t.Y(c.PosicaoY);
 
-                    // Corpos que saíram do universo (não há paredes) não precisam ser desenhados;
-                    // a comparação negada também descarta valores NaN/infinitos
+                    // Com o zoom automático todos ficam dentro do painel; a checagem ainda serve
+                    // para o modo sem zoom e, por ser negada, também descarta NaN/infinito
                     float margem = r * FatorHalo + 50;
                     if (!(x >= -margem && x <= area.Width + margem && y >= -margem && y <= area.Height + margem))
                         continue;
@@ -208,13 +340,24 @@ namespace SimuladorGravitacional
             }
         }
 
-        private static void DesenharLegenda(Graphics g, Size area, Font fonte)
+        private void DesenharLegenda(Graphics g, Size area, Transformacao t, IReadOnlyList<EstadoCorpo>? corpos, Font fonte)
         {
             double lado = Universo.LadoEmMetros / 1000;   // km
+            double kmPorPixel = 1 / t.Escala / 1000;
+            string texto = $"Universo (borda tracejada): {lado:N0} km × {lado:N0} km  |  1 px ≈ {kmPorPixel:N0} km";
+
+            if (corpos != null)
+            {
+                int fora = ContarPorArea(corpos).Fora;
+                if (fora > 0)
+                    texto += ZoomAutomatico
+                        ? $"  |  {fora} corpo(s) lançado(s) para fora da borda"
+                        : $"  |  {fora} corpo(s) fora da borda (ligue o zoom automático para vê-los)";
+            }
+
             using (SolidBrush pincel = new SolidBrush(CorTexto))
             {
-                g.DrawString($"Universo: {lado:N0} km × {lado:N0} km", fonte, pincel,
-                             8, area.Height - fonte.Height - 6);
+                g.DrawString(texto, fonte, pincel, 8, area.Height - fonte.Height - 6);
             }
         }
 

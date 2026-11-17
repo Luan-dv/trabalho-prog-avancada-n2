@@ -9,11 +9,17 @@ namespace SimuladorGravitacional
         // Intervalos de atualização da tela durante a simulação. A simulação roda o mais rápido
         // possível numa thread de fundo; redesenhar a cada interação desperdiçaria CPU que
         // deveria ir para o cálculo, então a tela recebe "fotografias" periódicas.
-        private const int IntervaloQuadroMs = 66;     // ~15 quadros por segundo
+        private const int IntervaloQuadroMs = 66;     // ~15 quadros por segundo na velocidade máxima
+        private const int IntervaloQuadroLentoMs = 16; // ~60 quadros por segundo com velocidade limitada
         private const int IntervaloTabelaMs = 500;    // a tabela é cara de reconstruir
+
+        // Lido pela thread da simulação e alterado pela tela (pode mudar durante a execução).
+        // volatile garante que a thread de fundo enxergue o valor novo assim que for alterado.
+        private volatile int _iteracoesPorSegundo = 30;
 
         private Universo? _universo;
         private int _sementeAtual;
+        private int _quantidadeInicial;                  // para contar as fusões
         private IReadOnlyList<EstadoCorpo>? _quadro;     // o que está sendo desenhado
         private CancellationTokenSource? _execucao;      // != null enquanto a simulação roda
         private bool _fecharAoTerminar;
@@ -24,9 +30,11 @@ namespace SimuladorGravitacional
         private readonly NumericUpDown nudIteracoes = new NumericUpDown { Minimum = 1, Maximum = 10000000, Value = 5000, Width = 80 };
         private readonly NumericUpDown nudTempo = new NumericUpDown { Minimum = 0.01m, Maximum = 1000000000, DecimalPlaces = 2, Value = 3600, Width = 90 };
         private readonly NumericUpDown nudThreads = new NumericUpDown { Minimum = 1, Maximum = 256, Width = 50 };
+        private readonly NumericUpDown nudVelocidade = new NumericUpDown { Minimum = 0, Maximum = 100000, Value = 30, Width = 70 };
         private readonly NumericUpDown nudSemente = new NumericUpDown { Minimum = 0, Maximum = int.MaxValue, Value = 0, Width = 90 };
         private readonly TextBox txtNome = new TextBox { Width = 160, PlaceholderText = "Nome da simulação" };
         private readonly CheckBox chkBanco = new CheckBox { Text = "Gravar no banco", Checked = true, AutoSize = true, Margin = new Padding(10, 5, 0, 0) };
+        private readonly CheckBox chkZoom = new CheckBox { Text = "Zoom automático", Checked = true, AutoSize = true, Margin = new Padding(10, 5, 0, 0) };
         private readonly Button btnGerar = new Button { Text = "Gerar universo", AutoSize = true };
         private readonly Button btnSimular = new Button { Text = "Simular", AutoSize = true };
         private readonly Button btnReplay = new Button { Text = "Replay...", AutoSize = true };
@@ -56,8 +64,9 @@ namespace SimuladorGravitacional
                 Rotulo("Iterações:"), nudIteracoes,
                 Rotulo("Tempo entre iterações (s):"), nudTempo,
                 Rotulo("Threads:"), nudThreads,
+                Rotulo("Iterações/s (0 = máxima):"), nudVelocidade,
                 Rotulo("Semente (0 = aleatória):"), nudSemente,
-                txtNome, chkBanco,
+                txtNome, chkBanco, chkZoom,
                 btnGerar, btnSimular, btnReplay, barra, lblStatus
             });
 
@@ -72,6 +81,12 @@ namespace SimuladorGravitacional
             btnGerar.Click += (s, e) => Gerar();
             btnSimular.Click += async (s, e) => await SimularOuParar();
             btnReplay.Click += (s, e) => AbrirReplay();
+            nudVelocidade.ValueChanged += (s, e) => _iteracoesPorSegundo = (int)nudVelocidade.Value;
+            chkZoom.CheckedChanged += (s, e) =>
+            {
+                _renderizador.ZoomAutomatico = chkZoom.Checked;
+                painel.Invalidate();
+            };
             painel.Paint += (s, e) =>
                 _renderizador.Desenhar(e.Graphics, painel.ClientSize, _quadro, "Gere um universo ou abra um replay para começar");
             FormClosing += AoFechar;
@@ -92,6 +107,7 @@ namespace SimuladorGravitacional
             var universo = new Universo();
             universo.GerarAleatoriamente((int)nudCorpos.Value, new Random(_sementeAtual));
             _universo = universo;
+            _quantidadeInicial = universo.Corpos.Count;
 
             MostrarQuadro(Capturar(universo), universo.IteracaoAtual, (int)nudIteracoes.Value, atualizarTabela: true);
             lblStatus.Text += $"  |  Semente: {_sementeAtual}";
@@ -146,9 +162,21 @@ namespace SimuladorGravitacional
             // desenha. Por isso cria uma cópia imutável (EstadoCorpo[]) e a envia com BeginInvoke,
             // que executa o desenho na thread da interface sem bloquear a simulação.
             var relogio = Stopwatch.StartNew();
+            var ritmo = Stopwatch.StartNew();
             void AoAvancar(Universo u)
             {
-                if (relogio.ElapsedMilliseconds < IntervaloQuadroMs) return;
+                // Velocidade limitada: espera o tempo que falta para a próxima interação. Medir
+                // desde a anterior (e não usar um Sleep fixo) desconta o tempo que o próprio
+                // cálculo e a gravação já gastaram. Esta espera fica fora dos cronômetros.
+                int ips = _iteracoesPorSegundo;
+                if (ips > 0)
+                {
+                    double faltaMs = 1000.0 / ips - ritmo.Elapsed.TotalMilliseconds;
+                    if (faltaMs > 1) Thread.Sleep((int)faltaMs);
+                }
+                ritmo.Restart();
+
+                if (relogio.ElapsedMilliseconds < (ips > 0 ? IntervaloQuadroLentoMs : IntervaloQuadroMs)) return;
                 relogio.Restart();
 
                 EstadoCorpo[] copia = Capturar(u);
@@ -243,7 +271,8 @@ namespace SimuladorGravitacional
         private void MostrarQuadro(IReadOnlyList<EstadoCorpo> corpos, int iteracao, int total, bool atualizarTabela)
         {
             _quadro = corpos;
-            lblStatus.Text = $"Iteração {iteracao:N0}/{total:N0}  |  Corpos: {corpos.Count}";
+            lblStatus.Text = $"Iteração {iteracao:N0}/{total:N0}  |  " +
+                             RenderizadorUniverso.DescreverCorpos(corpos, _quantidadeInicial);
             barra.Maximum = Math.Max(1, total);
             barra.Value = Math.Min(iteracao, barra.Maximum);
 

@@ -95,10 +95,15 @@ dotnet run --project SimuladorGravitacional -c Release
 1. Escolha nº de corpos, iterações, passo de tempo, **threads** e **semente**
    (0 = aleatória; a semente usada é gravada e permite repetir o mesmo universo).
 2. **Gerar universo** mostra o estado inicial.
-3. **Simular** roda em segundo plano o mais rápido possível, gravando no MySQL (se
-   "Gravar no banco" estiver marcado). A tela é atualizada ~15 vezes por segundo. **Parar**
-   interrompe e grava o que já foi calculado, com status `interrompida`.
-4. Ao terminar, aparece o resumo com os tempos e o id da simulação no banco.
+3. **Simular** roda em segundo plano, gravando no MySQL (se "Gravar no banco" estiver
+   marcado). **Iterações/s** controla a velocidade da animação (padrão 30; pode ser mudado
+   durante a simulação). Com **0**, roda o mais rápido possível. A espera da animação não
+   entra nos tempos medidos. **Parar** interrompe e grava o que já foi calculado, com status
+   `interrompida`.
+4. **Zoom automático** afasta a câmera para mostrar os corpos lançados para fora da área
+   inicial (borda tracejada). A barra de status separa os corpos dentro e fora da borda e
+   conta as fusões.
+5. Ao terminar, aparece o resumo com os tempos e o id da simulação no banco.
 
 ## 5. Replay
 

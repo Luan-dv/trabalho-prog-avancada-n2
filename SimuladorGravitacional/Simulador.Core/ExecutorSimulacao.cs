@@ -12,7 +12,9 @@ namespace SimuladorGravitacional
     {
         /// <param name="aoAvancar">
         /// Chamado na thread da simulação após cada interação (ex.: para a tela tirar uma cópia
-        /// dos corpos). Não entra em nenhum dos dois cronômetros parciais, só no total.
+        /// dos corpos ou esperar para a animação ficar mais lenta). Não entra em NENHUM
+        /// cronômetro, nem no total: a espera usada para o usuário acompanhar a simulação não
+        /// é processamento e distorceria a comparação de desempenho.
         /// </param>
         public static ResultadoExecucao Executar(
             Universo universo,
@@ -55,7 +57,12 @@ namespace SimuladorGravitacional
                     gravacao.Stop();
                 }
 
-                aoAvancar?.Invoke(universo);
+                if (aoAvancar != null)
+                {
+                    total.Stop();
+                    aoAvancar(universo);
+                    total.Start();
+                }
             }
 
             if (gravador != null)
