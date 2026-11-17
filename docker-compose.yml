@@ -1,0 +1,28 @@
+# Sobe um MySQL 8.4 local já com o schema criado.
+#   docker compose up -d      (primeira vez executa schema.sql automaticamente)
+#   docker compose down -v    (apaga o container E os dados)
+#
+# As senhas abaixo são apenas para desenvolvimento local; devem coincidir com o appsettings.json.
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: simulador-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root_dev
+      MYSQL_DATABASE: simulador
+      MYSQL_USER: simulador
+      MYSQL_PASSWORD: simulador_dev
+    ports:
+      # Mude a porta do host com MYSQL_PORTA se já houver um MySQL instalado usando a 3306
+      - "${MYSQL_PORTA:-3306}:3306"
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - dados-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  dados-mysql:

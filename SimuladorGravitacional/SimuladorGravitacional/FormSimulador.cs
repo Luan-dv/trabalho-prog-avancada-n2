@@ -1,55 +1,45 @@
-﻿using System;
-using System.Drawing;
-using System.IO;
-using System.Linq;
-using System.Windows.Forms;
+﻿using System.Diagnostics;
+using SimuladorGravitacional.Motores;
+using SimuladorGravitacional.Persistencia;
 
 namespace SimuladorGravitacional
 {
-    /// <summary>Painel com double buffering para desenhar sem piscar.</summary>
-    public class PainelUniverso : Panel
-    {
-        public PainelUniverso()
-        {
-            DoubleBuffered = true;
-            ResizeRedraw = true;
-        }
-    }
-
     public class FormSimulador : Form
     {
-        private const string ArquivoUniversoInicial = "universo_inicial.txt";
-        private const string FiltroArquivo = "Arquivo texto|*.txt";
-        private const int IntervaloTimerMs = 50;
+        // Intervalos de atualização da tela durante a simulação. A simulação roda o mais rápido
+        // possível numa thread de fundo; redesenhar a cada interação desperdiçaria CPU que
+        // deveria ir para o cálculo, então a tela recebe "fotografias" periódicas.
+        private const int IntervaloQuadroMs = 66;     // ~15 quadros por segundo
+        private const int IntervaloTabelaMs = 500;    // a tabela é cara de reconstruir
 
         private Universo? _universo;
-        private readonly Random _rnd = new Random();
+        private int _sementeAtual;
+        private IReadOnlyList<EstadoCorpo>? _quadro;     // o que está sendo desenhado
+        private CancellationTokenSource? _execucao;      // != null enquanto a simulação roda
+        private bool _fecharAoTerminar;
+        private readonly Stopwatch _relogioTabela = new Stopwatch();
         private readonly RenderizadorUniverso _renderizador = new RenderizadorUniverso();
-        private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = IntervaloTimerMs };
 
-        private readonly NumericUpDown nudCorpos = new NumericUpDown { Minimum = 1, Maximum = 500, Value = 10, Width = 60 };
+        private readonly NumericUpDown nudCorpos = new NumericUpDown { Minimum = 1, Maximum = 5000, Value = 10, Width = 60 };
         private readonly NumericUpDown nudIteracoes = new NumericUpDown { Minimum = 1, Maximum = 10000000, Value = 5000, Width = 80 };
-        private readonly NumericUpDown nudTempo = new NumericUpDown { Minimum = 1, Maximum = 1000000000, Value = 3600, Width = 90 };
+        private readonly NumericUpDown nudTempo = new NumericUpDown { Minimum = 0.01m, Maximum = 1000000000, DecimalPlaces = 2, Value = 3600, Width = 90 };
+        private readonly NumericUpDown nudThreads = new NumericUpDown { Minimum = 1, Maximum = 256, Width = 50 };
+        private readonly NumericUpDown nudSemente = new NumericUpDown { Minimum = 0, Maximum = int.MaxValue, Value = 0, Width = 90 };
+        private readonly TextBox txtNome = new TextBox { Width = 160, PlaceholderText = "Nome da simulação" };
+        private readonly CheckBox chkBanco = new CheckBox { Text = "Gravar no banco", Checked = true, AutoSize = true, Margin = new Padding(10, 5, 0, 0) };
         private readonly Button btnGerar = new Button { Text = "Gerar universo", AutoSize = true };
-        private readonly Button btnIniciar = new Button { Text = "Iniciar", AutoSize = true };
-        private readonly Button btnSalvar = new Button { Text = "Salvar", AutoSize = true };
-        private readonly Button btnCarregar = new Button { Text = "Carregar", AutoSize = true };
-        private readonly Label lblStatus = new Label { AutoSize = true, Margin = new Padding(15, 6, 0, 0) };
+        private readonly Button btnSimular = new Button { Text = "Simular", AutoSize = true };
+        private readonly Button btnReplay = new Button { Text = "Replay...", AutoSize = true };
+        private readonly ProgressBar barra = new ProgressBar { Width = 140, Height = 18, Margin = new Padding(10, 6, 0, 0) };
+        private readonly Label lblStatus = new Label { AutoSize = true, Margin = new Padding(10, 6, 0, 0) };
         private readonly PainelUniverso painel = new PainelUniverso { Dock = DockStyle.Fill, BackColor = Color.Black };
-        private readonly DataGridView grade = new DataGridView
-        {
-            Dock = DockStyle.Bottom,
-            Height = 220,
-            ReadOnly = true,
-            AllowUserToAddRows = false,
-            RowHeadersVisible = false,
-            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
-        };
+        private readonly DataGridView grade = TabelaCorpos.Criar(200);
 
         public FormSimulador()
         {
             Text = "Simulador gravitacional 2D";
-            ClientSize = new Size(1000, 720);
+            ClientSize = new Size(1150, 760);
+            nudThreads.Value = Math.Min(Environment.ProcessorCount, (int)nudThreads.Maximum);
 
             MontarLayout();
             LigarEventos();
@@ -65,7 +55,10 @@ namespace SimuladorGravitacional
                 Rotulo("Corpos:"), nudCorpos,
                 Rotulo("Iterações:"), nudIteracoes,
                 Rotulo("Tempo entre iterações (s):"), nudTempo,
-                btnGerar, btnIniciar, btnSalvar, btnCarregar, lblStatus
+                Rotulo("Threads:"), nudThreads,
+                Rotulo("Semente (0 = aleatória):"), nudSemente,
+                txtNome, chkBanco,
+                btnGerar, btnSimular, btnReplay, barra, lblStatus
             });
 
             // O controle Fill deve ser adicionado primeiro
@@ -77,11 +70,11 @@ namespace SimuladorGravitacional
         private void LigarEventos()
         {
             btnGerar.Click += (s, e) => Gerar();
-            btnIniciar.Click += (s, e) => AlternarExecucao();
-            btnSalvar.Click += (s, e) => Salvar();
-            btnCarregar.Click += (s, e) => Carregar();
-            _timer.Tick += (s, e) => Passo();
-            painel.Paint += Desenhar;
+            btnSimular.Click += async (s, e) => await SimularOuParar();
+            btnReplay.Click += (s, e) => AbrirReplay();
+            painel.Paint += (s, e) =>
+                _renderizador.Desenhar(e.Graphics, painel.ClientSize, _quadro, "Gere um universo ou abra um replay para começar");
+            FormClosing += AoFechar;
         }
 
         private static Label Rotulo(string texto)
@@ -89,117 +82,178 @@ namespace SimuladorGravitacional
             return new Label { Text = texto, AutoSize = true, Margin = new Padding(8, 6, 0, 0) };
         }
 
-        // ---------------------------------------------------------------- Ações dos botões
+        // ---------------------------------------------------------------- Ações
 
         private void Gerar()
         {
-            Pausar();
+            // Semente explícita para que o mesmo universo possa ser recriado (ela vai para o banco)
+            _sementeAtual = nudSemente.Value == 0 ? Random.Shared.Next(1, int.MaxValue) : (int)nudSemente.Value;
 
-            var universo = new Universo
-            {
-                TotalIteracoes = (int)nudIteracoes.Value,
-                PassoDeTempo = (double)nudTempo.Value
-            };
-            universo.GerarAleatoriamente((int)nudCorpos.Value, _rnd);
+            var universo = new Universo();
+            universo.GerarAleatoriamente((int)nudCorpos.Value, new Random(_sementeAtual));
             _universo = universo;
 
-            // Grava a posição inicial de cada corpo
-            string arquivo = Path.Combine(AppContext.BaseDirectory, ArquivoUniversoInicial);
-            RepositorioUniverso repo = new RepositorioArquivoTexto(arquivo);
-            repo.Gravar(universo);
-
-            Atualizar(universo);
+            MostrarQuadro(Capturar(universo), universo.IteracaoAtual, (int)nudIteracoes.Value, atualizarTabela: true);
+            lblStatus.Text += $"  |  Semente: {_sementeAtual}";
         }
 
-        private void AlternarExecucao()
+        private async Task SimularOuParar()
         {
-            if (_universo == null)
+            if (_execucao != null)
             {
-                MessageBox.Show("Gere ou carregue um universo primeiro.");
+                _execucao.Cancel();   // o laço confere o token entre interações e para de forma limpa
+                btnSimular.Enabled = false;
                 return;
             }
 
-            if (_timer.Enabled)
+            // Um universo já simulado não pode ser "continuado" com outros parâmetros: gera de novo
+            if (_universo == null || _universo.IteracaoAtual > 0)
+                Gerar();
+
+            Universo universo = _universo!;
+            universo.TotalIteracoes = (int)nudIteracoes.Value;
+            universo.PassoDeTempo = (double)nudTempo.Value;
+            int threads = (int)nudThreads.Value;
+            universo.Motor = new MotorParalelo(threads);
+
+            string nome = string.IsNullOrWhiteSpace(txtNome.Text)
+                ? $"Simulação {DateTime.Now:dd/MM/yyyy HH:mm:ss}"
+                : txtNome.Text.Trim();
+            var dados = new DadosSimulacao(nome, null, "interface", universo.Corpos.Count,
+                                           universo.TotalIteracoes, universo.PassoDeTempo, threads, _sementeAtual);
+
+            IGravadorSimulacao? gravador = null;
+            if (chkBanco.Checked)
             {
-                Pausar();
+                try
+                {
+                    gravador = new GravadorMySql(Configuracao.Carregar());
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, ex.Message, "Configuração do banco", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
             }
-            else
+
+            _execucao = new CancellationTokenSource();
+            CancellationToken token = _execucao.Token;
+            DefinirExecutando(true);
+            barra.Maximum = universo.TotalIteracoes;
+
+            // Chamado na thread da simulação. NÃO pode tocar em controles nem entregar o próprio
+            // Universo à tela, porque a simulação continua alterando os corpos enquanto a tela
+            // desenha. Por isso cria uma cópia imutável (EstadoCorpo[]) e a envia com BeginInvoke,
+            // que executa o desenho na thread da interface sem bloquear a simulação.
+            var relogio = Stopwatch.StartNew();
+            void AoAvancar(Universo u)
             {
-                _timer.Start();
-                btnIniciar.Text = "Pausar";
+                if (relogio.ElapsedMilliseconds < IntervaloQuadroMs) return;
+                relogio.Restart();
+
+                EstadoCorpo[] copia = Capturar(u);
+                int iteracao = u.IteracaoAtual, total = u.TotalIteracoes;
+                BeginInvoke(() => MostrarQuadro(copia, iteracao, total, atualizarTabela: false));
             }
+
+            try
+            {
+                ResultadoExecucao resultado = await Task.Run(
+                    () => ExecutorSimulacao.Executar(universo, dados, gravador, AoAvancar, token));
+
+                MostrarQuadro(Capturar(universo), universo.IteracaoAtual, universo.TotalIteracoes, atualizarTabela: true);
+                MostrarResumo(resultado, gravador as GravadorMySql);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "A simulação falhou:\n\n" + ex.Message, "Erro",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                gravador?.Dispose();
+                _execucao.Dispose();
+                _execucao = null;
+                DefinirExecutando(false);
+            }
+
+            if (_fecharAoTerminar) Close();
         }
 
-        private void Pausar()
+        private void MostrarResumo(ResultadoExecucao r, GravadorMySql? gravadorBanco)
         {
-            _timer.Stop();
-            btnIniciar.Text = "Iniciar";
+            string situacao = r.Interrompida ? "Simulação interrompida" : "Simulação concluída";
+            string banco = gravadorBanco != null
+                ? $"\nGravada no banco com id {gravadorBanco.SimulacaoId} ({r.LinhasGravadas:N0} estados)."
+                : "\n(Não gravada no banco.)";
+
+            MessageBox.Show(this,
+                $"{situacao} após {r.InteracoesConcluidas:N0} interações ({r.CorposFinais} corpos restantes).\n\n" +
+                $"Tempo total:    {r.TempoTotal.TotalSeconds:N3} s\n" +
+                $"Cálculo:           {r.TempoCalculo.TotalSeconds:N3} s\n" +
+                $"Gravação:         {r.TempoGravacao.TotalSeconds:N3} s" + banco,
+                "Resultado", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private void Passo()
+        private void AbrirReplay()
         {
-            if (_universo == null) return;
-
-            _universo.Avancar();
-            Atualizar(_universo);
-            if (_universo.Concluido) Pausar();
-        }
-
-        private void Salvar()
-        {
-            if (_universo == null) return;
-
-            using (SaveFileDialog dlg = new SaveFileDialog { Filter = FiltroArquivo })
+            Configuracao configuracao;
+            try
             {
-                if (dlg.ShowDialog() != DialogResult.OK) return;
-                RepositorioUniverso repo = new RepositorioArquivoTexto(dlg.FileName);
-                repo.Gravar(_universo);
+                configuracao = Configuracao.Carregar();
             }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Configuração do banco", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            new FormReplay(new RepositorioSimulacoes(configuracao)).Show(this);
         }
 
-        private void Carregar()
+        // Fechar no meio da simulação: pede o cancelamento e fecha quando a thread terminar,
+        // para não deixar a transação do banco aberta pela metade.
+        private void AoFechar(object? sender, FormClosingEventArgs e)
         {
-            using (OpenFileDialog dlg = new OpenFileDialog { Filter = FiltroArquivo })
+            if (_execucao == null)
             {
-                if (dlg.ShowDialog() != DialogResult.OK) return;
-
-                Pausar();
-                RepositorioUniverso repo = new RepositorioArquivoTexto(dlg.FileName);
-                Universo universo = repo.Carregar();
-                _universo = universo;
-
-                nudIteracoes.Value = Math.Clamp((decimal)universo.TotalIteracoes, nudIteracoes.Minimum, nudIteracoes.Maximum);
-                nudTempo.Value = Math.Clamp((decimal)universo.PassoDeTempo, nudTempo.Minimum, nudTempo.Maximum);
-                Atualizar(universo);
+                _renderizador.Dispose();
+                return;
             }
+
+            e.Cancel = true;
+            _fecharAoTerminar = true;
+            _execucao.Cancel();
         }
 
         // ---------------------------------------------------------------- Exibição
 
-        // Exibe a situação dos corpos na tela a cada iteração
-        private void Atualizar(Universo universo)
+        private static EstadoCorpo[] Capturar(Universo universo) =>
+            universo.Corpos.Select(c => c.CapturarEstado()).ToArray();
+
+        private void DefinirExecutando(bool executando)
         {
-            lblStatus.Text = "Iteração " + universo.IteracaoAtual + "/" + universo.TotalIteracoes +
-                             "  |  Corpos: " + universo.Corpos.Count;
+            foreach (Control c in new Control[] { nudCorpos, nudIteracoes, nudTempo, nudThreads, nudSemente, txtNome, chkBanco, btnGerar })
+                c.Enabled = !executando;
 
-            grade.DataSource = universo.Corpos.Select(c => new
-            {
-                c.Nome,
-                Massa = c.Massa.ToString("E3"),
-                Densidade = c.Densidade.ToString("E3"),
-                Raio = c.Raio.ToString("E3"),
-                PosX = c.PosicaoX.ToString("E3"),
-                PosY = c.PosicaoY.ToString("E3"),
-                VelX = c.VelocidadeX.ToString("E3"),
-                VelY = c.VelocidadeY.ToString("E3")
-            }).ToList();
-
-            painel.Invalidate();
+            btnSimular.Text = executando ? "Parar" : "Simular";
+            btnSimular.Enabled = true;
         }
 
-        private void Desenhar(object? sender, PaintEventArgs e)
+        private void MostrarQuadro(IReadOnlyList<EstadoCorpo> corpos, int iteracao, int total, bool atualizarTabela)
         {
-            _renderizador.Desenhar(e.Graphics, painel.ClientSize, _universo);
+            _quadro = corpos;
+            lblStatus.Text = $"Iteração {iteracao:N0}/{total:N0}  |  Corpos: {corpos.Count}";
+            barra.Maximum = Math.Max(1, total);
+            barra.Value = Math.Min(iteracao, barra.Maximum);
+
+            if (atualizarTabela || !_relogioTabela.IsRunning || _relogioTabela.ElapsedMilliseconds >= IntervaloTabelaMs)
+            {
+                TabelaCorpos.Preencher(grade, corpos);
+                _relogioTabela.Restart();
+            }
+
+            painel.Invalidate();
         }
     }
 }

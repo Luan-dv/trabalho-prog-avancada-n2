@@ -1,0 +1,12 @@
+# Artefatos do Visual Studio / build
+.vs/
+bin/
+obj/
+*.user
+*.suo
+
+# Configuração local com senha do banco (use appsettings.example.json como modelo)
+appsettings.json
+
+# Saídas do benchmark
+benchmark/resultados/

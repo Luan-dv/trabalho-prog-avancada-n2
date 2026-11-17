@@ -7,8 +7,10 @@ namespace SimuladorGravitacional
     /// <summary>
     /// Responsável só pelo visual da tela do universo: fundo espacial, estrelas, grade,
     /// corpos com brilho e legenda. Não altera nem calcula nada da simulação.
+    /// Recebe uma lista de <see cref="EstadoCorpo"/> (cópias) em vez do Universo, para servir
+    /// igualmente à simulação ao vivo e ao replay dos dados gravados no banco.
     /// </summary>
-    public class RenderizadorUniverso
+    public sealed class RenderizadorUniverso : IDisposable
     {
         // Tamanho do corpo na tela: o raio real é minúsculo perto do universo, então é ajustado só para exibição
         private const double FatorRaioVisual = 0.3;
@@ -56,26 +58,28 @@ namespace SimuladorGravitacional
             return estrelas;
         }
 
-        public void Desenhar(Graphics g, Size area, Universo? universo)
+        // Criada uma vez: a tela é redesenhada várias vezes por segundo durante a simulação/replay
+        private readonly Font _fonte = new Font("Segoe UI", 8f);
+
+        public void Desenhar(Graphics g, Size area, IReadOnlyList<EstadoCorpo>? corpos, string aviso)
         {
             if (area.Width <= 0 || area.Height <= 0) return;   // janela minimizada
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Font fonte = new Font("Segoe UI", 8f))
-            {
-                DesenharFundo(g, area);
-                DesenharEstrelas(g, area);
-                DesenharGrade(g, area);
+            DesenharFundo(g, area);
+            DesenharEstrelas(g, area);
+            DesenharGrade(g, area);
 
-                if (universo == null)
-                    DesenharAviso(g, area, fonte);
-                else
-                    DesenharCorpos(g, area, universo, fonte);
+            if (corpos == null)
+                DesenharAviso(g, area, _fonte, aviso);
+            else
+                DesenharCorpos(g, area, corpos, _fonte);
 
-                DesenharLegenda(g, area, fonte);
-                DesenharMoldura(g, area);
-            }
+            DesenharLegenda(g, area, _fonte);
+            DesenharMoldura(g, area);
         }
+
+        public void Dispose() => _fonte.Dispose();
 
         private static void DesenharFundo(Graphics g, Size area)
         {
@@ -112,16 +116,16 @@ namespace SimuladorGravitacional
             }
         }
 
-        private static void DesenharCorpos(Graphics g, Size area, Universo universo, Font fonte)
+        private static void DesenharCorpos(Graphics g, Size area, IReadOnlyList<EstadoCorpo> corpos, Font fonte)
         {
             double escalaX = area.Width / Universo.LadoEmMetros;
             double escalaY = area.Height / Universo.LadoEmMetros;
             double escalaRaio = Math.Min(escalaX, escalaY);   // mantém o corpo redondo, não achatado
-            bool mostrarNomes = universo.Corpos.Count <= LimiteRotulos;
+            bool mostrarNomes = corpos.Count <= LimiteRotulos;
 
             using (SolidBrush pincelTexto = new SolidBrush(CorTexto))
             {
-                foreach (Corpo c in universo.Corpos)
+                foreach (EstadoCorpo c in corpos)
                 {
                     float r = (float)Math.Max(RaioMinimoPx, c.Raio * escalaRaio * FatorRaioVisual);
                     float x = (float)(c.PosicaoX * escalaX);
@@ -179,7 +183,7 @@ namespace SimuladorGravitacional
             }
         }
 
-        private static Color CorDoCorpo(Corpo c)
+        private static Color CorDoCorpo(EstadoCorpo c)
         {
             double t = Math.Clamp((c.Densidade - DensidadeFria) / (DensidadeQuente - DensidadeFria), 0.0, 1.0);
             return Mesclar(CorFria, CorQuente, t);
@@ -194,12 +198,12 @@ namespace SimuladorGravitacional
                 (int)(a.B + (b.B - a.B) * t));
         }
 
-        private static void DesenharAviso(Graphics g, Size area, Font fonte)
+        private static void DesenharAviso(Graphics g, Size area, Font fonte, string aviso)
         {
             using (SolidBrush pincel = new SolidBrush(CorTexto))
             using (StringFormat centro = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
             {
-                g.DrawString("Gere ou carregue um universo para começar", fonte, pincel,
+                g.DrawString(aviso, fonte, pincel,
                              new RectangleF(0, 0, area.Width, area.Height), centro);
             }
         }
