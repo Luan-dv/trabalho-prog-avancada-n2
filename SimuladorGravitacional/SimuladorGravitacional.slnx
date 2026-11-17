@@ -1,6 +1,7 @@
 <Solution>
-  <Project Path="Simulador.Benchmark/Simulador.Benchmark.csproj" />
-  <Project Path="Simulador.Core/Simulador.Core.csproj" />
-  <Project Path="Simulador.Tests/Simulador.Tests.csproj" />
+  <!-- A interface vem primeiro: o Visual Studio usa o primeiro projeto como projeto de inicialização -->
   <Project Path="SimuladorGravitacional/SimuladorGravitacional.csproj" />
+  <Project Path="Simulador.Core/Simulador.Core.csproj" />
+  <Project Path="Simulador.Benchmark/Simulador.Benchmark.csproj" />
+  <Project Path="Simulador.Tests/Simulador.Tests.csproj" />
 </Solution>
